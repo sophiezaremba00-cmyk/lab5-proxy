@@ -1,362 +1,220 @@
 import http from 'node:http';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 
-import { Command, InvalidArgumentError } from 'commander';
+import { Command } from 'commander';
 import superagent from 'superagent';
 
-// Максимальний розмір зображення — 10 МБ.
-const MAX_IMAGE_SIZE = 10 * 1024 * 1024;
-
-// Час очікування відповіді від http.cat.
-const RESPONSE_TIMEOUT = 10000;
-const REQUEST_TIMEOUT = 15000;
+// 1. Налаштування командного рядка
 
 const program = new Command();
 
-function parsePort(value) {
-    const port = Number(value);
-
-    if (
-        !Number.isInteger(port) ||
-        port < 1 ||
-        port > 65535
-    ) {
-        throw new InvalidArgumentError(
-            'Порт має бути цілим числом від 1 до 65535.'
-        );
-    }
-
-    return port;
-}
-
 program
     .name('http-image-proxy')
-    .description(
-        'HTTP-проксі для отримання та кешування зображень http.cat'
-    )
-    .helpOption('-? --help', 'показати довідку')
-    .requiredOption(
-        '-h, --host <address>',
-        'адреса, на якій працює сервер'
-    )
-    .requiredOption(
-        '-p, --port <number>',
-        'порт сервера',
-        parsePort
-    )
-    .requiredOption(
-        '-c, --cache <path>',
-        'шлях до теки кешу'
-    );
+    .description('Кешуючий HTTP-проксі для зображень http.cat')
+    .helpOption('-? --help')
+    .requiredOption('-h, --host <address>', 'Адреса сервера')
+    .requiredOption('-p, --port <number>', 'Порт сервера')
+    .requiredOption('-c, --cache <path>', 'Тека кешу');
 
 program.parse(process.argv);
 
 const options = program.opts();
-
 const HOST = options.host;
-const PORT = options.port;
+const PORT = Number(options.port);
 const CACHE_DIR = path.resolve(options.cache);
 
-
-function isJpeg(buffer) {
-    return (
-        Buffer.isBuffer(buffer) &&
-        buffer.length >= 3 &&
-        buffer[0] === 0xFF &&
-        buffer[1] === 0xD8 &&
-        buffer[2] === 0xFF
-    );
+if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) {
+    throw new Error('Порт має бути цілим числом від 1 до 65535.');
 }
 
+// 2. Допоміжні функції
 
-function getCacheFilePath(statusCode) {
-    return path.join(CACHE_DIR, `${statusCode}.jpg`);
+function getCachePath(code) {
+    return path.join(CACHE_DIR, `${code}.jpg`);
 }
 
-function sendJson(res, statusCode, data, headers = {}) {
-    const body = Buffer.from(JSON.stringify(data));
+function isJpeg(data) {
+    return Buffer.isBuffer(data) &&
+        data.length >= 3 &&
+        data[0] === 0xFF &&
+        data[1] === 0xD8 &&
+        data[2] === 0xFF;
+}
 
-    res.writeHead(statusCode, {
+function sendJson(res, status, data, headers = {}) {
+    res.writeHead(status, {
         'Content-Type': 'application/json; charset=utf-8',
-        'Content-Length': body.length,
         ...headers
     });
-
-    res.end(body);
+    res.end(JSON.stringify(data));
 }
 
-function getStatusCodeFromUrl(requestUrl) {
+function getStatusCode(requestUrl) {
     try {
-        const url = new URL(requestUrl, 'http://localhost');
+        const pathname = new URL(
+            requestUrl,
+            'http://localhost'
+        ).pathname;
 
-        const match = url.pathname.match(/^\/(\d{3})$/);
+        const match = pathname.match(/^\/(\d{3})$/);
 
-        if (!match) {
-            return null;
-        }
+        if (!match) return null;
 
-        const statusCode = Number(match[1]);
+        const code = Number(match[1]);
 
-        if (statusCode < 100 || statusCode > 599) {
-            return null;
-        }
-
-        return statusCode;
+        return code >= 100 && code <= 599 ? code : null;
     } catch {
         return null;
     }
 }
 
+// 3. Робота з кешем
 
-async function readFromCache(filePath) {
+async function readCache(filePath) {
     try {
         const image = await fs.readFile(filePath);
 
         if (!isJpeg(image)) {
-            await fs.unlink(filePath);
+            await fs.rm(filePath, { force: true });
             return null;
         }
 
         return image;
     } catch (error) {
-        if (error.code === 'ENOENT') {
-            return null;
-        }
-
+        if (error.code === 'ENOENT') return null;
         throw error;
     }
 }
 
-async function saveToCache(filePath, image) {
-    await fs.mkdir(CACHE_DIR, {
-        recursive: true
-    });
+async function saveCache(filePath, image) {
+    await fs.mkdir(CACHE_DIR, { recursive: true });
 
-    const temporaryPath = `${filePath}.${Date.now()}.tmp`;
+    const tempPath = `${filePath}.${randomUUID()}.tmp`;
 
     try {
-        await fs.writeFile(temporaryPath, image, {
-            flag: 'wx'
-        });
-
-        await fs.rename(temporaryPath, filePath);
+        await fs.writeFile(tempPath, image);
+        await fs.rename(tempPath, filePath);
     } catch (error) {
         try {
-            await fs.rm(temporaryPath, {
-                force: true
-            });
+            await fs.rm(tempPath, { force: true });
         } catch {
-        
+            // Ігноруємо помилку видалення тимчасового файлу.
         }
 
         throw error;
     }
 }
 
-/**
- * Видаляє файл із кешу.
- */
-async function deleteFromCache(filePath) {
-    await fs.unlink(filePath);
-}
+// 4. Отримання картинки з http.cat
 
-async function fetchFromHttpCat(statusCode) {
-    const url = `https://http.cat/${statusCode}`;
-
+async function fetchImage(code) {
     const response = await superagent
-        .get(url)
-        .set('Accept', 'image/jpeg')
+        .get(`https://http.cat/${code}`)
         .buffer(true)
-        .maxResponseSize(MAX_IMAGE_SIZE)
+        .maxResponseSize(10 * 1024 * 1024)
         .timeout({
-            response: RESPONSE_TIMEOUT,
-            deadline: REQUEST_TIMEOUT
+            response: 10000,
+            deadline: 15000
         });
 
     const contentType = (
         response.headers['content-type'] || ''
-    )
-        .split(';')[0]
-        .trim()
-        .toLowerCase();
+    ).split(';')[0].trim().toLowerCase();
 
-    if (response.status !== 200) {
-        throw new Error(
-            `http.cat повернув статус ${response.status}.`
-        );
+    if (
+        response.status !== 200 ||
+        contentType !== 'image/jpeg' ||
+        !isJpeg(response.body)
+    ) {
+        throw new Error('Не вдалося отримати JPEG-картинку.');
     }
 
-    if (contentType !== 'image/jpeg') {
-        throw new Error(
-            `Очікувався image/jpeg, отримано ${contentType}.`
-        );
-    }
-
-    const image = response.body;
-
-    if (!isJpeg(image)) {
-        throw new Error(
-            'Отримані дані не є JPEG-зображенням.'
-        );
-    }
-
-    return image;
+    return response.body;
 }
 
-async function handleGet(res, statusCode) {
-    const filePath = getCacheFilePath(statusCode);
+// 5. Обробка GET
 
-    let image = await readFromCache(filePath);
+async function handleGet(res, code) {
+    const filePath = getCachePath(code);
 
+    let image = await readCache(filePath);
     let source = 'cache';
 
-    if (image === null) {
+    if (!image) {
         try {
-            image = await fetchFromHttpCat(statusCode);
+            image = await fetchImage(code);
         } catch (error) {
-            console.error(
-                'Помилка отримання картинки з http.cat:',
-                error.message
-            );
+            console.error('Помилка http.cat:', error.message);
 
             sendJson(res, 404, {
-                error: 'Картинку не знайдено на http.cat або виникла помилка запиту.',
-                statusCode
+                error: 'Картинку не знайдено або не вдалося отримати.'
             });
 
             return;
         }
 
-        await saveToCache(filePath, image);
-
+        await saveCache(filePath, image);
         source = 'http.cat';
     }
 
     res.writeHead(200, {
         'Content-Type': 'image/jpeg',
-        'Content-Length': image.length,
         'X-Image-Source': source
     });
 
     res.end(image);
 }
 
+// 6. Отримання тіла PUT-запиту
+
 async function readRequestBody(req) {
     const chunks = [];
 
-    let totalSize = 0;
-    let tooLarge = false;
-
     for await (const chunk of req) {
-        totalSize += chunk.length;
-
-        if (totalSize > MAX_IMAGE_SIZE) {
-            tooLarge = true;
-            chunks.length = 0;
-            continue;
-        }
-
-        if (!tooLarge) {
-            chunks.push(Buffer.from(chunk));
-        }
+        chunks.push(chunk);
     }
 
-    if (tooLarge) {
-        return {
-            tooLarge: true,
-            body: null
-        };
-    }
-
-    return {
-        tooLarge: false,
-        body: Buffer.concat(chunks)
-    };
+    return Buffer.concat(chunks);
 }
 
+// 7. Обробка PUT
 
-async function handlePut(req, res, statusCode) {
-    const contentType = (
-        req.headers['content-type'] || ''
-    )
-        .split(';')[0]
-        .trim()
-        .toLowerCase();
-
-    const allowedTypes = [
-        'image/jpeg',
-        'application/octet-stream'
-    ];
-
-    if (!allowedTypes.includes(contentType)) {
-        req.resume();
-
-        sendJson(res, 400, {
-            error: 'Непідтримуваний Content-Type.'
-        });
-
-        return;
-    }
-
-    const result = await readRequestBody(req);
-
-    if (result.tooLarge) {
-        sendJson(res, 413, {
-            error: 'Розмір зображення перевищує 10 МБ.'
-        });
-
-        return;
-    }
-
-    const image = result.body;
-
-    if (!image || image.length === 0) {
-        sendJson(res, 400, {
-            error: 'Тіло PUT-запиту порожнє.'
-        });
-
-        return;
-    }
+async function handlePut(req, res, code) {
+    const image = await readRequestBody(req);
 
     if (!isJpeg(image)) {
         sendJson(res, 400, {
-            error: 'Передані дані не є JPEG-зображенням.'
+            error: 'Тіло запиту не містить коректного JPEG-зображення.'
         });
-
         return;
     }
 
-    const filePath = getCacheFilePath(statusCode);
-
-    await saveToCache(filePath, image);
+    await saveCache(getCachePath(code), image);
 
     sendJson(res, 201, {
-        message: 'Картинку успішно записано в кеш.',
-        statusCode,
-        file: `${statusCode}.jpg`
+        message: 'Картинку записано в кеш.',
+        statusCode: code
     });
 }
 
+// 8. Обробка DELETE
 
-async function handleDelete(res, statusCode) {
-    const filePath = getCacheFilePath(statusCode);
-
+async function handleDelete(res, code) {
     try {
-        await deleteFromCache(filePath);
+        await fs.unlink(getCachePath(code));
 
         sendJson(res, 200, {
-            message: 'Картинку успішно видалено з кешу.',
-            statusCode
+            message: 'Картинку видалено з кешу.',
+            statusCode: code
         });
     } catch (error) {
         if (error.code === 'ENOENT') {
             sendJson(res, 404, {
-                error: 'Картинку не знайдено в кеші.',
-                statusCode
+                error: 'Картинку не знайдено в кеші.'
             });
-
             return;
         }
 
@@ -364,34 +222,28 @@ async function handleDelete(res, statusCode) {
     }
 }
 
+// 9. Головний обробник запитів
 
 async function handleRequest(req, res) {
-    const allowedMethods = [
-        'GET',
-        'PUT',
-        'DELETE'
-    ];
+    const methods = ['GET', 'PUT', 'DELETE'];
 
-    if (!allowedMethods.includes(req.method)) {
+    if (!methods.includes(req.method)) {
         req.resume();
 
-        sendJson(
-            res,
-            405,
-            {
-                error: 'Метод HTTP не підтримується.'
-            },
-            {
-                Allow: 'GET, PUT, DELETE'
-            }
-        );
+        sendJson(res, 405, {
+            error: 'Метод HTTP не підтримується.'
+        }, {
+            Allow: 'GET, PUT, DELETE'
+        });
 
         return;
     }
 
-    const statusCode = getStatusCodeFromUrl(req.url || '/');
+    const code = getStatusCode(req.url || '/');
 
-    if (statusCode === null) {
+    if (code === null) {
+        req.resume();
+
         sendJson(res, 404, {
             error: 'Неправильний шлях. Використовуйте формат /NNN.'
         });
@@ -401,35 +253,29 @@ async function handleRequest(req, res) {
 
     switch (req.method) {
         case 'GET':
-            await handleGet(res, statusCode);
+            await handleGet(res, code);
             break;
 
         case 'PUT':
-            await handlePut(req, res, statusCode);
+            await handlePut(req, res, code);
             break;
 
         case 'DELETE':
-            await handleDelete(res, statusCode);
+            await handleDelete(res, code);
             break;
     }
 }
 
-async function main() {
-    // Створення теки кешу, якщо вона не існує.
-    await fs.mkdir(CACHE_DIR, {
-        recursive: true
-    });
+// 10. Створення та запуск сервера
 
-    // Створення HTTP-сервера.
-    // Це єдиний колбек у програмі, дозволений методичкою.
+async function main() {
+    await fs.mkdir(CACHE_DIR, { recursive: true });
+
     const server = http.createServer(async (req, res) => {
         try {
             await handleRequest(req, res);
         } catch (error) {
-            console.error(
-                'Помилка обробки HTTP-запиту:',
-                error.message
-            );
+            console.error('Помилка:', error.message);
 
             if (res.headersSent) {
                 res.destroy();
@@ -442,23 +288,17 @@ async function main() {
         }
     });
 
-    // Запуск сервера з параметрами командного рядка.
     server.listen(PORT, HOST);
-
-    // Очікування успішного запуску сервера.
     await once(server, 'listening');
 
-    console.log('HTTP-сервер успішно запущено.');
+    console.log('Сервер запущено!');
     console.log(`Адреса: http://${HOST}:${PORT}`);
     console.log(`Тека кешу: ${CACHE_DIR}`);
-    console.log('Доступні методи: GET, PUT, DELETE');
 }
-
 
 try {
     await main();
 } catch (error) {
-    console.error('Помилка запуску сервера:', error.message);
-
+    console.error('Помилка запуску:', error.message);
     process.exitCode = 1;
 }
