@@ -1,63 +1,239 @@
-
 import http from 'node:http';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { once } from 'node:events';
-import { Command } from 'commander';
-import superagent from 'superagent';
-import { randomUUID } from 'node:crypto';
 
-// Створюємо об'єкт для роботи з командним рядком.
+import { Command, InvalidArgumentError } from 'commander';
+import superagent from 'superagent';
+
+// Максимальний розмір зображення — 10 МБ.
+const MAX_IMAGE_SIZE = 10 * 1024 * 1024;
+
+// Час очікування відповіді від http.cat.
+const RESPONSE_TIMEOUT = 10000;
+const REQUEST_TIMEOUT = 15000;
+
 const program = new Command();
 
-program
-    .name('lab5-proxy')
-    .description('Кешуючий HTTP-проксі-сервер для зображень http.cat')
-    .helpOption('-?, --help', 'показати довідку')
-    .requiredOption('-h, --host <address>', 'адреса сервера')
-    .requiredOption('-p, --port <number>', 'порт сервера')
-    .requiredOption('-c, --cache <path>', 'шлях до теки кешу');
+function parsePort(value) {
+    const port = Number(value);
 
-// Обробляємо передані аргументи.
+    if (
+        !Number.isInteger(port) ||
+        port < 1 ||
+        port > 65535
+    ) {
+        throw new InvalidArgumentError(
+            'Порт має бути цілим числом від 1 до 65535.'
+        );
+    }
+
+    return port;
+}
+
+program
+    .name('http-image-proxy')
+    .description(
+        'HTTP-проксі для отримання та кешування зображень http.cat'
+    )
+    .helpOption('-? --help', 'показати довідку')
+    .requiredOption(
+        '-h, --host <address>',
+        'адреса, на якій працює сервер'
+    )
+    .requiredOption(
+        '-p, --port <number>',
+        'порт сервера',
+        parsePort
+    )
+    .requiredOption(
+        '-c, --cache <path>',
+        'шлях до теки кешу'
+    );
+
 program.parse(process.argv);
 
 const options = program.opts();
 
-// Отримуємо HTTP-код із шляху URL.
-function getStatusCodeFromUrl(requestUrl) {
-    let url;
+const HOST = options.host;
+const PORT = options.port;
+const CACHE_DIR = path.resolve(options.cache);
 
+
+function isJpeg(buffer) {
+    return (
+        Buffer.isBuffer(buffer) &&
+        buffer.length >= 3 &&
+        buffer[0] === 0xFF &&
+        buffer[1] === 0xD8 &&
+        buffer[2] === 0xFF
+    );
+}
+
+
+function getCacheFilePath(statusCode) {
+    return path.join(CACHE_DIR, `${statusCode}.jpg`);
+}
+
+function sendJson(res, statusCode, data, headers = {}) {
+    const body = Buffer.from(JSON.stringify(data));
+
+    res.writeHead(statusCode, {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Content-Length': body.length,
+        ...headers
+    });
+
+    res.end(body);
+}
+
+function getStatusCodeFromUrl(requestUrl) {
     try {
-        url = new URL(requestUrl, 'http://localhost');
+        const url = new URL(requestUrl, 'http://localhost');
+
+        const match = url.pathname.match(/^\/(\d{3})$/);
+
+        if (!match) {
+            return null;
+        }
+
+        const statusCode = Number(match[1]);
+
+        if (statusCode < 100 || statusCode > 599) {
+            return null;
+        }
+
+        return statusCode;
     } catch {
         return null;
     }
+}
 
-    const match = url.pathname.match(/^\/([1-5]\d{2})$/);
 
-    if (!match) {
-        return null;
+async function readFromCache(filePath) {
+    try {
+        const image = await fs.readFile(filePath);
+
+        if (!isJpeg(image)) {
+            await fs.unlink(filePath);
+            return null;
+        }
+
+        return image;
+    } catch (error) {
+        if (error.code === 'ENOENT') {
+            return null;
+        }
+
+        throw error;
     }
-
-    return Number(match[1]);
 }
 
-// Формуємо шлях до файлу картинки в кеші.
-function getCacheFilePath(cacheDir, statusCode) {
-    return path.join(cacheDir, `${statusCode}.jpg`);
-}
-
-// Надсилаємо текстову відповідь із заданим кодом.
-function sendTextResponse(res, statusCode, message) {
-    res.writeHead(statusCode, {
-        'Content-Type': 'text/plain; charset=utf-8'
+async function saveToCache(filePath, image) {
+    await fs.mkdir(CACHE_DIR, {
+        recursive: true
     });
 
-    res.end(message);
+    const temporaryPath = `${filePath}.${Date.now()}.tmp`;
+
+    try {
+        await fs.writeFile(temporaryPath, image, {
+            flag: 'wx'
+        });
+
+        await fs.rename(temporaryPath, filePath);
+    } catch (error) {
+        try {
+            await fs.rm(temporaryPath, {
+                force: true
+            });
+        } catch {
+        
+        }
+
+        throw error;
+    }
 }
 
-// Надсилаємо картинку користувачеві.
-function sendImageResponse(res, image, source) {
+/**
+ * Видаляє файл із кешу.
+ */
+async function deleteFromCache(filePath) {
+    await fs.unlink(filePath);
+}
+
+async function fetchFromHttpCat(statusCode) {
+    const url = `https://http.cat/${statusCode}`;
+
+    const response = await superagent
+        .get(url)
+        .set('Accept', 'image/jpeg')
+        .buffer(true)
+        .maxResponseSize(MAX_IMAGE_SIZE)
+        .timeout({
+            response: RESPONSE_TIMEOUT,
+            deadline: REQUEST_TIMEOUT
+        });
+
+    const contentType = (
+        response.headers['content-type'] || ''
+    )
+        .split(';')[0]
+        .trim()
+        .toLowerCase();
+
+    if (response.status !== 200) {
+        throw new Error(
+            `http.cat повернув статус ${response.status}.`
+        );
+    }
+
+    if (contentType !== 'image/jpeg') {
+        throw new Error(
+            `Очікувався image/jpeg, отримано ${contentType}.`
+        );
+    }
+
+    const image = response.body;
+
+    if (!isJpeg(image)) {
+        throw new Error(
+            'Отримані дані не є JPEG-зображенням.'
+        );
+    }
+
+    return image;
+}
+
+async function handleGet(res, statusCode) {
+    const filePath = getCacheFilePath(statusCode);
+
+    let image = await readFromCache(filePath);
+
+    let source = 'cache';
+
+    if (image === null) {
+        try {
+            image = await fetchFromHttpCat(statusCode);
+        } catch (error) {
+            console.error(
+                'Помилка отримання картинки з http.cat:',
+                error.message
+            );
+
+            sendJson(res, 404, {
+                error: 'Картинку не знайдено на http.cat або виникла помилка запиту.',
+                statusCode
+            });
+
+            return;
+        }
+
+        await saveToCache(filePath, image);
+
+        source = 'http.cat';
+    }
+
     res.writeHead(200, {
         'Content-Type': 'image/jpeg',
         'Content-Length': image.length,
@@ -67,184 +243,222 @@ function sendImageResponse(res, image, source) {
     res.end(image);
 }
 
-// Зберігаємо картинку через тимчасовий файл.
-async function saveImageToCache(filePath, image) {
-    const temporaryPath = `${filePath}.${randomUUID()}.tmp`;
+async function readRequestBody(req) {
+    const chunks = [];
+
+    let totalSize = 0;
+    let tooLarge = false;
+
+    for await (const chunk of req) {
+        totalSize += chunk.length;
+
+        if (totalSize > MAX_IMAGE_SIZE) {
+            tooLarge = true;
+            chunks.length = 0;
+            continue;
+        }
+
+        if (!tooLarge) {
+            chunks.push(Buffer.from(chunk));
+        }
+    }
+
+    if (tooLarge) {
+        return {
+            tooLarge: true,
+            body: null
+        };
+    }
+
+    return {
+        tooLarge: false,
+        body: Buffer.concat(chunks)
+    };
+}
+
+
+async function handlePut(req, res, statusCode) {
+    const contentType = (
+        req.headers['content-type'] || ''
+    )
+        .split(';')[0]
+        .trim()
+        .toLowerCase();
+
+    const allowedTypes = [
+        'image/jpeg',
+        'application/octet-stream'
+    ];
+
+    if (!allowedTypes.includes(contentType)) {
+        req.resume();
+
+        sendJson(res, 400, {
+            error: 'Непідтримуваний Content-Type.'
+        });
+
+        return;
+    }
+
+    const result = await readRequestBody(req);
+
+    if (result.tooLarge) {
+        sendJson(res, 413, {
+            error: 'Розмір зображення перевищує 10 МБ.'
+        });
+
+        return;
+    }
+
+    const image = result.body;
+
+    if (!image || image.length === 0) {
+        sendJson(res, 400, {
+            error: 'Тіло PUT-запиту порожнє.'
+        });
+
+        return;
+    }
+
+    if (!isJpeg(image)) {
+        sendJson(res, 400, {
+            error: 'Передані дані не є JPEG-зображенням.'
+        });
+
+        return;
+    }
+
+    const filePath = getCacheFilePath(statusCode);
+
+    await saveToCache(filePath, image);
+
+    sendJson(res, 201, {
+        message: 'Картинку успішно записано в кеш.',
+        statusCode,
+        file: `${statusCode}.jpg`
+    });
+}
+
+
+async function handleDelete(res, statusCode) {
+    const filePath = getCacheFilePath(statusCode);
 
     try {
-        await fs.writeFile(temporaryPath, image);
-        await fs.rename(temporaryPath, filePath);
+        await deleteFromCache(filePath);
+
+        sendJson(res, 200, {
+            message: 'Картинку успішно видалено з кешу.',
+            statusCode
+        });
     } catch (error) {
-        try {
-            await fs.unlink(temporaryPath);
-        } catch {
-            // Тимчасовий файл міг не встигнути створитися.
+        if (error.code === 'ENOENT') {
+            sendJson(res, 404, {
+                error: 'Картинку не знайдено в кеші.',
+                statusCode
+            });
+
+            return;
         }
 
         throw error;
     }
 }
 
-// Обробляємо GET-запит для отримання картинки.
-async function handleGetRequest(statusCode, cacheDir, res) {
-    const filePath = getCacheFilePath(cacheDir, statusCode);
 
-    // Спочатку перевіряємо локальний кеш.
-    try {
-        const cachedImage = await fs.readFile(filePath);
+async function handleRequest(req, res) {
+    const allowedMethods = [
+        'GET',
+        'PUT',
+        'DELETE'
+    ];
 
-        // Картинка знайдена в кеші.
-        sendImageResponse(res, cachedImage, 'cache');
-        return;
-    } catch (error) {
-        // Якщо файл не знайдений, продовжуємо роботу.
-        if (error.code !== 'ENOENT') {
-            throw error;
-        }
-    }
+    if (!allowedMethods.includes(req.method)) {
+        req.resume();
 
-    // Якщо картинки немає, звертаємося до http.cat.
-    let externalResponse;
-
-    try {
-        externalResponse = await superagent
-            .get(`https://http.cat/${statusCode}`)
-            .timeout({
-                response: 10000,
-                deadline: 15000
-            });
-    } catch (error) {
-        console.error(
-            `Помилка отримання картинки з http.cat: ${error.message}`
-        );
-
-        sendTextResponse(
+        sendJson(
             res,
-            404,
-            `Картинку для HTTP-коду ${statusCode} не знайдено.`
+            405,
+            {
+                error: 'Метод HTTP не підтримується.'
+            },
+            {
+                Allow: 'GET, PUT, DELETE'
+            }
         );
 
         return;
     }
 
-    // Отримуємо двійкові дані картинки.
-    const image = externalResponse.body;
+    const statusCode = getStatusCodeFromUrl(req.url || '/');
 
-    if (!Buffer.isBuffer(image) || image.length === 0) {
-        sendTextResponse(
-            res,
-            404,
-            `Не вдалося отримати картинку для коду ${statusCode}.`
-        );
-
-        return;
-    }
-
-    // Зберігаємо отриману картинку в кеш.
-    await saveImageToCache(filePath, image);
-
-    // Повертаємо картинку користувачеві.
-    sendImageResponse(res, image, 'http.cat');
-}
-
-// Перевіряємо правильність номера порту.
-function parsePort(value) {
-    const port = Number(value);
-
-    if (!Number.isInteger(port) || port < 1 || port > 65535) {
-        throw new Error(
-            'Порт повинен бути цілим числом від 1 до 65535.'
-        );
-    }
-
-    return port;
-}
-
-// Запускаємо сервер.
-async function startServer() {
-    const host = options.host.trim();
-    const port = parsePort(options.port);
-    const cachePath = options.cache.trim();
-
-    if (!host || !cachePath) {
-        throw new Error('Адреса та шлях до кешу не можуть бути порожніми.');
-    }
-
-    // Створюємо теку кешу, якщо вона ще не існує.
-    const cacheDir = path.resolve(cachePath);
-
-    await fs.mkdir(cacheDir, { recursive: true });
-
-    // Створюємо HTTP-сервер.
-    const server = http.createServer(async (req, res) => {
-    try {
-        // Визначаємо HTTP-код із URL.
-        const statusCode = getStatusCodeFromUrl(req.url);
-
-        // Перевіряємо правильність адреси.
-        if (statusCode === null) {
-            sendTextResponse(
-                res,
-                404,
-                'Неправильний шлях. Використовуйте формат /404.'
-            );
-
-            return;
-        }
-
-        // Обробляємо GET-запит.
-        if (req.method === 'GET') {
-            await handleGetRequest(statusCode, cacheDir, res);
-            return;
-        }
-
-        // PUT і DELETE реалізуємо на наступних етапах.
-        if (req.method === 'PUT' || req.method === 'DELETE') {
-            sendTextResponse(
-                res,
-                501,
-                'Цей метод ще не реалізовано.'
-            );
-
-            return;
-        }
-
-        // Обробка інших HTTP-методів.
-        res.writeHead(405, {
-            'Content-Type': 'text/plain; charset=utf-8',
-            'Allow': 'GET, PUT, DELETE'
+    if (statusCode === null) {
+        sendJson(res, 404, {
+            error: 'Неправильний шлях. Використовуйте формат /NNN.'
         });
 
-        res.end('Метод HTTP не підтримується.');
-    } catch (error) {
-        console.error(`Помилка обробки запиту: ${error.message}`);
-
-        if (!res.headersSent) {
-            sendTextResponse(
-                res,
-                500,
-                'Внутрішня помилка сервера.'
-            );
-        } else {
-            res.destroy();
-        }
+        return;
     }
-});
 
-    // Запускаємо сервер без callback-функції.
-    server.listen(port, host);
+    switch (req.method) {
+        case 'GET':
+            await handleGet(res, statusCode);
+            break;
 
-    // Очікуємо запуску сервера через Promise.
-    await once(server, 'listening');
+        case 'PUT':
+            await handlePut(req, res, statusCode);
+            break;
 
-    console.log(`Сервер запущено: http://${host}:${port}`);
-    console.log(`Тека кешу: ${cacheDir}`);
+        case 'DELETE':
+            await handleDelete(res, statusCode);
+            break;
+    }
 }
 
-// Обробляємо помилки запуску.
+async function main() {
+    // Створення теки кешу, якщо вона не існує.
+    await fs.mkdir(CACHE_DIR, {
+        recursive: true
+    });
+
+    // Створення HTTP-сервера.
+    // Це єдиний колбек у програмі, дозволений методичкою.
+    const server = http.createServer(async (req, res) => {
+        try {
+            await handleRequest(req, res);
+        } catch (error) {
+            console.error(
+                'Помилка обробки HTTP-запиту:',
+                error.message
+            );
+
+            if (res.headersSent) {
+                res.destroy();
+                return;
+            }
+
+            sendJson(res, 500, {
+                error: 'Внутрішня помилка сервера.'
+            });
+        }
+    });
+
+    // Запуск сервера з параметрами командного рядка.
+    server.listen(PORT, HOST);
+
+    // Очікування успішного запуску сервера.
+    await once(server, 'listening');
+
+    console.log('HTTP-сервер успішно запущено.');
+    console.log(`Адреса: http://${HOST}:${PORT}`);
+    console.log(`Тека кешу: ${CACHE_DIR}`);
+    console.log('Доступні методи: GET, PUT, DELETE');
+}
+
+
 try {
-    await startServer();
+    await main();
 } catch (error) {
-    console.error(`Помилка запуску: ${error.message}`);
+    console.error('Помилка запуску сервера:', error.message);
+
     process.exitCode = 1;
 }
