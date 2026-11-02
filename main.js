@@ -27,7 +27,7 @@ const PORT = Number(options.port);
 const CACHE_DIR = path.resolve(options.cache);
 
 if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) {
-    throw new Error('Порт має бути цілим числом від 1 до 65535.');
+    program.error('Порт має бути цілим числом від 1 до 65535.');
 }
 
 // 2. Допоміжні функції

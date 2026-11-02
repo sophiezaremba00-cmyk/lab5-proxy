@@ -1,14 +1,13 @@
 {
   "name": "lab5-proxy",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "Кешуючий HTTP-проксі для картинок http.cat на Node.js (модуль http, commander, superagent)",
+  "main": "main.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
     "start": "node main.js --host 127.0.0.1 --port 3000 --cache ./cache"
   },
   "keywords": [],
-  "author": "",
+  "author": "Софія Заремба",
   "license": "ISC",
   "type": "module",
   "dependencies": {

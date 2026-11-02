@@ -1,0 +1,78 @@
+# Перевірка HTTP-проксі за допомогою curl
+#
+# Команди виконуються з кореня репозиторію (там лежить sample.jpg).
+# У PowerShell замість curl пишіть curl.exe (curl там — аліас на Invoke-WebRequest).
+# Прапорець -D - виводить заголовки відповіді в термінал, а -o зберігає у файл
+# лише тіло (картинку). Тека out/ створюється автоматично (--create-dirs) і не потрапляє в git.
+# Перед перевіркою з нуля видаліть теку кешу: rm -rf cache  (PowerShell: Remove-Item -Recurse cache)
+
+
+# 0. Запуск без обов'язкової опції (--cache)
+#    Очікується: повідомлення про помилку й ненульовий код виходу
+node main.js --host 127.0.0.1 --port 3000
+echo $?
+# (PowerShell: echo $LASTEXITCODE)
+
+# 0.1 Запуск із некоректним портом
+#    Очікується: повідомлення про помилку й код виходу 1
+node main.js --host 127.0.0.1 --port abc --cache ./cache
+
+# 0.2 Запуск сервера (в окремому терміналі; далі всі команди — в іншому)
+node main.js --host 127.0.0.1 --port 3000 --cache ./cache
+
+
+# 1. GET — картинки немає в кеші
+#    Очікується: 200, Content-Type: image/jpeg, X-Image-Source: http.cat
+curl -s -D - --create-dirs -o out/first.jpg http://127.0.0.1:3000/404
+
+# 2. GET — повторний запит тієї самої картинки
+#    Очікується: 200, X-Image-Source: cache
+curl -s -D - --create-dirs -o out/second.jpg http://127.0.0.1:3000/404
+
+# 3. GET — інша картинка
+#    Очікується: 200, X-Image-Source: http.cat
+curl -s -D - --create-dirs -o out/third.jpg http://127.0.0.1:3000/418
+
+# 4. PUT — запис власної картинки в кеш (бінарне тіло)
+#    Очікується: 201
+curl -i -X PUT -H "Content-Type: image/jpeg" --data-binary "@sample.jpg" http://127.0.0.1:3000/200
+
+# 5. GET — картинка після PUT
+#    Очікується: 200, X-Image-Source: cache (це наша картинка, а не з http.cat)
+curl -s -D - --create-dirs -o out/put-result.jpg http://127.0.0.1:3000/200
+
+# 5.1 Порівняння: файли мають бути однаковими (без виводу = збігаються)
+cmp sample.jpg out/put-result.jpg
+# (Windows: fc /b sample.jpg out\put-result.jpg)
+
+# 6. DELETE — видалення картинки з кешу
+#    Очікується: 200
+curl -i -X DELETE http://127.0.0.1:3000/200
+
+# 7. DELETE — спроба видалити картинку, якої вже немає
+#    Очікується: 404
+curl -i -X DELETE http://127.0.0.1:3000/200
+
+# 8. GET — після DELETE картинка знову береться з http.cat
+#    Очікується: 200, X-Image-Source: http.cat
+curl -s -D - --create-dirs -o out/after-delete.jpg http://127.0.0.1:3000/200
+
+# 9. GET — неправильний шлях
+#    Очікується: 404 і повідомлення про формат /NNN
+curl -i http://127.0.0.1:3000/abc
+
+# 10. GET — код поза діапазоном 100–599
+#     Очікується: 404
+curl -i http://127.0.0.1:3000/999
+
+# 11. POST — непідтримуваний метод
+#     Очікується: 405 і заголовок Allow: GET, PUT, DELETE
+curl -i -X POST http://127.0.0.1:3000/404
+
+# 12. HEAD — теж непідтримуваний метод
+#     Очікується: 405
+curl -I http://127.0.0.1:3000/404
+
+# 13. PUT — некоректні дані (не JPEG)
+#     Очікується: 400, у кеш нічого не записується
+curl -i -X PUT -H "Content-Type: image/jpeg" --data-binary "invalid data" http://127.0.0.1:3000/201

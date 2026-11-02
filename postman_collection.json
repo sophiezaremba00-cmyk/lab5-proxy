@@ -1,0 +1,258 @@
+{
+  "info": {
+    "name": "lab5-proxy",
+    "description": "Колекція для перевірки кешуючого проксі-сервера. Перед запуском «з нуля» очистіть теку cache.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://127.0.0.1:3000",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "1. GET /404 — картинки немає в кеші",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Код стану 200', () => pm.response.to.have.status(200));",
+              "pm.test('Content-Type: image/jpeg', () => pm.response.to.have.header('Content-Type', 'image/jpeg'));",
+              "pm.test('X-Image-Source: http.cat', () => pm.expect(pm.response.headers.get('X-Image-Source')).to.eql('http.cat'));",
+              "pm.collectionVariables.set('timeFirst', pm.response.responseTime);",
+              "console.log('Перший GET (http.cat):', pm.response.responseTime, 'мс');"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/404",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "404"
+          ]
+        },
+        "description": "Перший запит: проксі йде на http.cat, зберігає картинку в кеш і віддає її."
+      }
+    },
+    {
+      "name": "2. GET /404 — повторний запит (з кешу)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Код стану 200', () => pm.response.to.have.status(200));",
+              "pm.test('Content-Type: image/jpeg', () => pm.response.to.have.header('Content-Type', 'image/jpeg'));",
+              "pm.test('X-Image-Source: cache', () => pm.expect(pm.response.headers.get('X-Image-Source')).to.eql('cache'));",
+              "console.log('Перший GET:', pm.collectionVariables.get('timeFirst'), 'мс; повторний GET (кеш):', pm.response.responseTime, 'мс');"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/404",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "404"
+          ]
+        },
+        "description": "Повторний запит тієї самої картинки: відповідь береться з теки кешу."
+      }
+    },
+    {
+      "name": "3. PUT /200 — власна картинка (бінарний файл)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Код стану 201', () => pm.response.to.have.status(201));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "PUT",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "image/jpeg"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/200",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "200"
+          ]
+        },
+        "body": {
+          "mode": "file",
+          "file": {
+            "src": "sample.jpg"
+          }
+        },
+        "description": "У Body обрано binary → sample.jpg. Після імпорту оберіть файл заново."
+      }
+    },
+    {
+      "name": "4. GET /200 — після PUT (наша картинка)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Код стану 200', () => pm.response.to.have.status(200));",
+              "pm.test('Content-Type: image/jpeg', () => pm.response.to.have.header('Content-Type', 'image/jpeg'));",
+              "pm.test('X-Image-Source: cache', () => pm.expect(pm.response.headers.get('X-Image-Source')).to.eql('cache'));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/200",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "200"
+          ]
+        },
+        "description": "Картинки для 200 раніше в кеші не було, тож source=cache означає, що це результат PUT, а не http.cat."
+      }
+    },
+    {
+      "name": "5. DELETE /200",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Код стану 200', () => pm.response.to.have.status(200));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "DELETE",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/200",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "200"
+          ]
+        }
+      }
+    },
+    {
+      "name": "6. DELETE /200 — картинки вже немає",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Код стану 404', () => pm.response.to.have.status(404));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "DELETE",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/200",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "200"
+          ]
+        }
+      }
+    },
+    {
+      "name": "7. GET /999 — неіснуючий код",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Код стану 404', () => pm.response.to.have.status(404));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/999",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "999"
+          ]
+        },
+        "description": "Код поза діапазоном 100–599 — сервер відповідає 404."
+      }
+    },
+    {
+      "name": "8. POST /404 — недозволений метод",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Код стану 405', () => pm.response.to.have.status(405));",
+              "pm.test('Заголовок Allow', () => pm.expect(pm.response.headers.get('Allow')).to.eql('GET, PUT, DELETE'));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/404",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "404"
+          ]
+        }
+      }
+    }
+  ]
+}
