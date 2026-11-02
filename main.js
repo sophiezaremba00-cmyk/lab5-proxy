@@ -177,13 +177,59 @@ async function startServer() {
 
     // Створюємо HTTP-сервер.
     const server = http.createServer(async (req, res) => {
-        // Тимчасова відповідь до реалізації HTTP-методів.
-        res.writeHead(501, {
-            'Content-Type': 'text/plain; charset=utf-8'
+    try {
+        // Визначаємо HTTP-код із URL.
+        const statusCode = getStatusCodeFromUrl(req.url);
+
+        // Перевіряємо правильність адреси.
+        if (statusCode === null) {
+            sendTextResponse(
+                res,
+                404,
+                'Неправильний шлях. Використовуйте формат /404.'
+            );
+
+            return;
+        }
+
+        // Обробляємо GET-запит.
+        if (req.method === 'GET') {
+            await handleGetRequest(statusCode, cacheDir, res);
+            return;
+        }
+
+        // PUT і DELETE реалізуємо на наступних етапах.
+        if (req.method === 'PUT' || req.method === 'DELETE') {
+            sendTextResponse(
+                res,
+                501,
+                'Цей метод ще не реалізовано.'
+            );
+
+            return;
+        }
+
+        // Обробка інших HTTP-методів.
+        res.writeHead(405, {
+            'Content-Type': 'text/plain; charset=utf-8',
+            'Allow': 'GET, PUT, DELETE'
         });
 
-        res.end('Обробник запитів буде реалізовано на наступних етапах.');
-    });
+        res.end('Метод HTTP не підтримується.');
+    } catch (error) {
+        console.error(`Помилка обробки запиту: ${error.message}`);
+
+        if (!res.headersSent) {
+            sendTextResponse(
+                res,
+                500,
+                'Внутрішня помилка сервера.'
+            );
+        } else {
+            res.destroy();
+        }
+    }
+});
 
     // Запускаємо сервер без callback-функції.
     server.listen(port, host);
