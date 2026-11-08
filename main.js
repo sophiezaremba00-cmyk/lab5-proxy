@@ -292,7 +292,7 @@ async function main() {
 
     console.log('Сервер запущено!');
     console.log(`Адреса: http://${HOST}:${PORT}`);
-    console.log(`Тека кешу: ${CACHE_DIR}`);
+console.log(`Тека кешу: ${CACHE_DIR}`);
 }
 
 try {
