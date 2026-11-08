@@ -33,7 +33,7 @@ if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) {
 // 2. Допоміжні функції
 
 function getCachePath(code) {
-    return path.join(CACHE_DIR, `${code}.jpg`);
+   return path.join(CACHE_DIR, `${code}.jpg`);
 }
 
 function isJpeg(data) {
