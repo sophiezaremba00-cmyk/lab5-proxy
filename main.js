@@ -7,8 +7,6 @@ import { once } from 'node:events';
 import { Command } from 'commander';
 import superagent from 'superagent';
 
-// 1. Налаштування командного рядка
-
 const program = new Command();
 
 program
@@ -29,8 +27,6 @@ const CACHE_DIR = path.resolve(options.cache);
 if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) {
     program.error('Порт має бути цілим числом від 1 до 65535.');
 }
-
-// 2. Допоміжні функції
 
 function getCachePath(code) {
    return path.join(CACHE_DIR, `${code}.jpg`);
@@ -71,8 +67,6 @@ const match = pathname.match(/^\/(\d{3})$/);
     }
 }
 
-// 3. Робота з кешем
-
 async function readCache(filePath) {
     try {
         const image = await fs.readFile(filePath);
@@ -107,8 +101,6 @@ async function saveCache(filePath, image) {
     }
 }
 
-// 4. Отримання картинки з http.cat
-
 async function fetchImage(code) {
     const response = await superagent
         .get(`https://http.cat/${code}`)
@@ -133,8 +125,6 @@ async function fetchImage(code) {
 
     return response.body;
 }
-
-// 5. Обробка GET
 
 async function handleGet(res, code) {
     const filePath = getCachePath(code);
@@ -167,8 +157,6 @@ async function handleGet(res, code) {
     res.end(image);
 }
 
-// 6. Отримання тіла PUT-запиту
-
 async function readRequestBody(req) {
     const chunks = [];
 
@@ -178,8 +166,6 @@ async function readRequestBody(req) {
 
     return Buffer.concat(chunks);
 }
-
-// 7. Обробка PUT
 
 async function handlePut(req, res, code) {
     const image = await readRequestBody(req);
@@ -198,8 +184,6 @@ async function handlePut(req, res, code) {
         statusCode: code
     });
 }
-
-// 8. Обробка DELETE
 
 async function handleDelete(res, code) {
     try {
@@ -220,8 +204,6 @@ async function handleDelete(res, code) {
         throw error;
     }
 }
-
-// 9. Головний обробник запитів
 
 async function handleRequest(req, res) {
     const methods = ['GET', 'PUT', 'DELETE'];
@@ -264,8 +246,6 @@ async function handleRequest(req, res) {
             break;
     }
 }
-
-// 10. Створення та запуск сервера
 
 async function main() {
     await fs.mkdir(CACHE_DIR, { recursive: true });
