@@ -101,7 +101,6 @@ async function saveCache(filePath, image) {
         try {
             await fs.rm(tempPath, { force: true });
         } catch {
-            // Ігноруємо помилку видалення тимчасового файлу.
         }
 
         throw error;
