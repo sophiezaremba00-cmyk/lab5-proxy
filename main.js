@@ -54,12 +54,12 @@ function sendJson(res, status, data, headers = {}) {
 
 function getStatusCode(requestUrl) {
     try {
-        const pathname = new URL(
-            requestUrl,
-            'http://localhost'
-        ).pathname;
+       const pathname = new URL(
+    requestUrl,
+    'http://localhost'
+).pathname;
 
-        const match = pathname.match(/^\/(\d{3})$/);
+const match = pathname.match(/^\/(\d{3})$/);
 
         if (!match) return null;
 
